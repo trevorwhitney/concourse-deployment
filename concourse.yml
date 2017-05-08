@@ -1,0 +1,200 @@
+---
+name: concourse
+
+releases:
+- name: concourse
+  version: 2.7.4
+  url: https://bosh.io/d/github.com/concourse/concourse?v=2.7.4
+  sha1: 59f20ddea3ffd9bcab572abb3e2e1137aa3d6e7a
+- name: bosh-google-cpi
+  version: 25.7.1
+  url: https://bosh.io/d/github.com/cloudfoundry-incubator/bosh-google-cpi-release?v=25.7.1
+  sha1: 1412d974845b28afc0fadadceabd3ee12bd83b69
+- name: garden-runc
+  version: 1.6.0
+  url: https://bosh.io/d/github.com/cloudfoundry/garden-runc-release?v=1.6.0
+  sha1: 58fbc64aff303e6d76899441241dd5dacef50cb7
+- name: os-conf
+  version: 12
+  url: https://bosh.io/d/github.com/cloudfoundry/os-conf-release?v=12
+  sha1: af5a2c9f228b9d7ec4bd051d71fef0e712fa1549
+
+resource_pools:
+- name: vms
+  network: concourse
+  env:
+    bosh:
+      password: '*'
+  stemcell:
+    url: https://bosh.io/d/stemcells/bosh-google-kvm-ubuntu-trusty-go_agent?v=3363.20
+    sha1: e785b42faffc5b546ed13fc28e523a4e0c622f0a
+  cloud_properties:
+    zone: ((zone))
+    machine_type: n1-standard-1
+    root_disk_size_gb: 40
+    root_disk_type: pd-standard
+    ephemeral_external_ip: true
+    service_account: ((service_account))
+    target_pool: concourse-public
+    tags:
+      - concourse
+      - internal
+
+cloud_provider:
+  template:
+    name: google_cpi
+    release: bosh-google-cpi
+  mbus: https://mbus:((mbus_bootstrap_password))@((external_ip)):6868
+  properties:
+    ntp: [169.254.169.254]
+    agent: {mbus: "https://mbus:((mbus_bootstrap_password))@0.0.0.0:6868"}
+    blobstore: {provider: local, path: /var/vcap/micro_bosh/data/cache}
+    google:
+      project: ((project_id))
+      json_key: ((gcp_credentials))
+
+disk_pools:
+- name: disks
+  disk_size: 32_768
+  cloud_properties:
+    type: pd-standard
+
+networks:
+- name: concourse
+  type: manual
+  subnets:
+  - range: ((internal_cidr))
+    gateway: ((internal_gw))
+    static: [((internal_ip))]
+    dns: [169.254.169.254, 8.8.8.8]
+    cloud_properties:
+      network_name: ((network))
+      subnetwork_name: ((subnetwork))
+
+instance_groups:
+- name: concourse
+  instances: 1
+  resource_pool: vms
+  networks:
+  - name: concourse
+    static_ips: [((internal_ip))]
+  jobs:
+  - name: atc
+    release: concourse
+    properties:
+      bind_port: 80
+      tls_bind_port: 443
+      external_url: &external_url ((external_url))
+      publicly_viewable: true
+      tls_cert: ((concourse_ssl.certificate))
+      tls_key: ((concourse_ssl.private_key))
+      github_auth:
+        client_id: ((github_client_id))
+        client_secret: ((github_client_secret))
+        authorize:
+          - organization: ((github_org))
+            teams: [((github_team))]
+      postgresql:
+        host: 127.0.0.1
+        port: 5432
+        database: &atc_db atc
+        sslmode: disable
+        role:
+          name: &atc_role atc
+          password: &atc_password ((db_password))
+  - name: tsa
+    release: concourse
+    properties:
+      atc:
+        url: *external_url
+  - name: postgresql
+    release: concourse
+    properties:
+      databases:
+      - name: *atc_db
+        role: *atc_role
+        password: *atc_password
+  - name: groundcrew
+    release: concourse
+    properties:
+      tsa:
+        host: 127.0.0.1
+      baggageclaim:
+        url: http://127.0.0.1:7788
+      additional_resource_types:
+      - type: gcs-resource
+        image: docker:///frodenas/gcs-resource
+  - name: baggageclaim
+    release: concourse
+    properties: {}
+  - name: garden
+    release: garden-runc
+    properties:
+      garden:
+        listen_network: tcp
+        listen_address: 0.0.0.0:7777
+  - name: disable_agent
+    release: os-conf
+    properties: {}
+  - name: user_add
+    release: os-conf
+    properties:
+      users:
+      - name: bosh
+        public_key: ((bosh_ssh.public_key))
+
+update:
+  canaries: 1
+  max_in_flight: 1
+  serial: false
+  canary_watch_time: 1000-60000
+  update_watch_time: 1000-60000
+
+variables:
+- name: zone
+  type: string
+- name: network
+  type: string
+- name: subnetwork
+  type: string
+- name: db_password
+  type: password
+- name: nats_password
+  type: password
+- name: blobstore_agent_password
+  type: password
+- name: mbus_bootstrap_password
+  type: password
+- name: github_client_id
+  type: string
+- name: github_client_secret
+  type: string
+- name: github_org
+  type: string
+- name: github_team
+  type: string
+- name: gcp_credentials
+  type: string
+- name: external_url
+  type: string
+- name: external_ip
+  type: string
+- name: internal_ip
+  type: string
+- name: internal_cidr
+  type: string
+- name: internal_gw
+  type: string
+- name: bosh_ssh
+  type: ssh
+- name: default_ca
+  type: certificate
+  options:
+    is_ca: true
+    common_name: ca
+- name: concourse_ssl
+  type: certificate
+  options:
+    ca: default_ca
+    common_name: ((internal_ip))
+    alternative_names: [((internal_ip)), ((external_ip))]
